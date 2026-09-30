@@ -1,8 +1,9 @@
 import { serve } from '@hono/node-server';
-import { loadConfig } from './config.js';
+import { loadConfig, loadDotEnv } from './config.js';
 import { openDb } from './db/client.js';
 import { createApp } from './http/app.js';
 
+loadDotEnv();
 const config = loadConfig();
 const db = openDb(config.databasePath);
 const app = createApp(db);

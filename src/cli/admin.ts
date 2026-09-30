@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { loadConfig } from '../config.js';
+import { loadConfig, loadDotEnv } from '../config.js';
 import { WalletError } from '../core/errors.js';
 import { formatTime } from '../core/time.js';
 import { DEFAULT_PLAYER_NAME, UserService } from '../core/users.js';
@@ -17,7 +17,7 @@ Commands:
   list-keys --user <id>           List a user's API keys
   revoke-key --key-id <id>        Revoke an API key
 
-Environment: DATABASE_PATH (default ./data/agentwallet.db)`;
+Environment: DATABASE_PATH (default ./data/agentwallet.db); also read from .env if present`;
 
 function main(argv: string[]): number {
   const [command, ...rest] = argv;
@@ -44,6 +44,7 @@ function main(argv: string[]): number {
     return v;
   };
 
+  loadDotEnv();
   const users = new UserService(openDb(loadConfig().databasePath));
 
   switch (command) {

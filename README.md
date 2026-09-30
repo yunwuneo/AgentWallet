@@ -21,6 +21,12 @@ PORT=8787 DATABASE_PATH=./data/agentwallet.db pnpm start
 
 ### 环境变量
 
+可以直接设置环境变量，也可以写在项目根目录的 `.env` 文件里（参考 `.env.example`）。服务和管理 CLI 启动时都会读取 `.env`；同名变量如果已经在环境中设置，以环境中的为准。
+
+```bash
+cp .env.example .env   # Windows: copy .env.example .env
+```
+
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `HOST` | `0.0.0.0` | 监听地址 |
