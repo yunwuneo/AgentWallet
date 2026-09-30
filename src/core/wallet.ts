@@ -1,14 +1,19 @@
-import { and, desc, eq, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, getTableColumns, gte, isNotNull, isNull, lt, ne, or, sql, type SQL } from 'drizzle-orm';
 import type { DbHandle } from '../db/client.js';
 import { accounts, transactions, type Account, type Transaction } from '../db/schema.js';
 import { WalletError } from './errors.js';
+import type { WalletEvents } from './events.js';
 import { newId } from './ids.js';
 import { formatCents } from './money.js';
+import { startOfMonthShanghai } from './time.js';
 
 type DbOrTx = DbHandle;
 
-/** A side of a transaction as given by the caller: an account (by name) or a free-text external party. */
-export type PartyInput = { account: string } | { external: string };
+/** An account reference: its name (as the MCP tools use) or `{ id }` (as the web API uses). */
+export type AccountRef = string | { id: string };
+
+/** A side of a transaction as given by the caller: an account or a free-text external party. */
+export type PartyInput = { account: string } | { accountId: string } | { external: string };
 
 export type Party = { kind: 'account'; id: string; name: string } | { kind: 'external'; name: string };
 
@@ -44,6 +49,33 @@ export interface CreateAccountInput {
   overdraftLimit?: number;
 }
 
+export interface TransactionQuery {
+  account?: AccountRef;
+  /**
+   * With `account`: relative to that account (in = received, out = paid, internal = with another own wallet).
+   * Without: relative to the user (in = from an external party, out = to one, internal = between own wallets).
+   */
+  direction?: 'in' | 'out' | 'internal';
+  status?: 'active' | 'voided' | 'all';
+  /** Opaque cursor from a previous page's `nextCursor`. */
+  cursor?: string;
+  limit?: number;
+}
+
+export interface WalletSummary {
+  /** Cents; sum of all non-archived account balances. */
+  total: number;
+  accounts: AccountWithBalance[];
+  /** Cents received from / paid to external parties this month (Asia/Shanghai), excluding opening balances. */
+  month: { income: number; expense: number };
+}
+
+export interface WalletServiceOptions {
+  now?: () => number;
+  /** Receives a change notification after each successful write. */
+  events?: WalletEvents;
+}
+
 export const OPENING_PARTY = '初始余额';
 
 const NAME_MAX = 64;
@@ -51,13 +83,21 @@ const EXTERNAL_MAX = 100;
 const REASON_MAX = 500;
 const REF_MAX = 200;
 
+type ResolvedParty = { kind: 'account'; account: Account } | { kind: 'external'; name: string };
+
 /** Ledger operations for a single user. Every method is scoped to `userId`; accounts of other users are invisible. */
 export class WalletService {
+  private readonly now: () => number;
+  private readonly events?: WalletEvents;
+
   constructor(
     private readonly db: DbHandle,
     readonly userId: string,
-    private readonly now: () => number = Date.now,
-  ) {}
+    opts: WalletServiceOptions = {},
+  ) {
+    this.now = opts.now ?? Date.now;
+    this.events = opts.events;
+  }
 
   // ---------------------------------------------------------------- accounts
 
@@ -68,23 +108,17 @@ export class WalletService {
       .where(
         and(eq(accounts.userId, this.userId), opts.includeArchived ? undefined : isNull(accounts.archivedAt)),
       )
-      .orderBy(accounts.createdAt)
+      .orderBy(sql`${accounts.kind} = 'player' desc`, accounts.createdAt)
       .all();
     return rows.map((a) => this.withBalance(this.db, a));
   }
 
-  getAccount(name: string, opts: { allowArchived?: boolean } = {}): AccountWithBalance {
-    return this.withBalance(this.db, this.resolveAccount(this.db, name, opts));
+  getAccount(ref: AccountRef, opts: { allowArchived?: boolean } = {}): AccountWithBalance {
+    return this.withBalance(this.db, this.resolveAccount(this.db, ref, opts));
   }
 
   getAccountById(id: string): AccountWithBalance {
-    const account = this.db
-      .select()
-      .from(accounts)
-      .where(and(eq(accounts.userId, this.userId), eq(accounts.id, id)))
-      .get();
-    if (!account) throw new WalletError('ACCOUNT_NOT_FOUND', `找不到账户 ${id}。`);
-    return this.withBalance(this.db, account);
+    return this.getAccount({ id }, { allowArchived: true });
   }
 
   createAccount(input: CreateAccountInput): AccountWithBalance {
@@ -100,7 +134,7 @@ export class WalletService {
       );
     }
 
-    return this.db.transaction(
+    const result = this.db.transaction(
       (tx) => {
         this.assertNameFree(tx, name);
         if (kind === 'player') {
@@ -145,12 +179,14 @@ export class WalletService {
       },
       { behavior: 'immediate' },
     );
+    this.notify('accounts');
+    return result;
   }
 
-  updateAccount(name: string, patch: { newName?: string; overdraftLimit?: number }): AccountWithBalance {
-    return this.db.transaction(
+  updateAccount(ref: AccountRef, patch: { newName?: string; overdraftLimit?: number }): AccountWithBalance {
+    const result = this.db.transaction(
       (tx) => {
-        const account = this.resolveAccount(tx, name);
+        const account = this.resolveAccount(tx, ref);
         const changes: Partial<Account> = {};
         if (patch.newName !== undefined) {
           const newName = cleanText(patch.newName, '账户名', NAME_MAX);
@@ -169,12 +205,14 @@ export class WalletService {
       },
       { behavior: 'immediate' },
     );
+    this.notify('accounts');
+    return result;
   }
 
-  archiveAccount(name: string): AccountWithBalance {
-    return this.db.transaction(
+  archiveAccount(ref: AccountRef): AccountWithBalance {
+    const result = this.db.transaction(
       (tx) => {
-        const account = this.resolveAccount(tx, name);
+        const account = this.resolveAccount(tx, ref);
         if (account.kind === 'player') throw new WalletError('FORBIDDEN', '玩家账户不能归档。');
         const archivedAt = this.now();
         tx.update(accounts).set({ archivedAt }).where(eq(accounts.id, account.id)).run();
@@ -182,6 +220,33 @@ export class WalletService {
       },
       { behavior: 'immediate' },
     );
+    this.notify('accounts');
+    return result;
+  }
+
+  getSummary(): WalletSummary {
+    const list = this.listAccounts();
+    const monthStart = startOfMonthShanghai(this.now());
+    const row = this.db
+      .select({
+        income: sql<number>`coalesce(sum(case when ${transactions.fromExternal} is not null then ${transactions.amount} else 0 end), 0)`,
+        expense: sql<number>`coalesce(sum(case when ${transactions.toExternal} is not null then ${transactions.amount} else 0 end), 0)`,
+      })
+      .from(transactions)
+      .where(
+        and(
+          eq(transactions.userId, this.userId),
+          eq(transactions.status, 'active'),
+          ne(transactions.type, 'opening'),
+          gte(transactions.createdAt, monthStart),
+        ),
+      )
+      .get();
+    return {
+      total: list.reduce((sum, a) => sum + a.balance, 0),
+      accounts: list,
+      month: { income: Number(row?.income ?? 0), expense: Number(row?.expense ?? 0) },
+    };
   }
 
   // ------------------------------------------------------------ transactions
@@ -194,7 +259,7 @@ export class WalletService {
     const messageId = optionalText(input.messageId, 'message_id', REF_MAX);
     const idempotencyKey = optionalText(input.idempotencyKey, 'idempotency_key', REF_MAX);
 
-    return this.db.transaction(
+    const result = this.db.transaction(
       (tx) => {
         const from = this.resolveParty(tx, input.from, '付款方');
         const to = this.resolveParty(tx, input.to, '收款方');
@@ -263,31 +328,69 @@ export class WalletService {
       },
       { behavior: 'immediate' },
     );
+    if (!result.duplicate) this.notify('transactions');
+    return result;
   }
 
-  listTransactions(opts: { account?: string; limit?: number; includeVoided?: boolean } = {}): TransactionWithParties[] {
-    const limit = Math.min(Math.max(opts.limit ?? 20, 1), 100);
-    const accountId = opts.account ? this.resolveAccount(this.db, opts.account, { allowArchived: true }).id : undefined;
-    const rows = this.db
-      .select()
-      .from(transactions)
-      .where(
-        and(
-          eq(transactions.userId, this.userId),
-          opts.includeVoided ? undefined : eq(transactions.status, 'active'),
-          accountId ? or(eq(transactions.fromAccountId, accountId), eq(transactions.toAccountId, accountId)) : undefined,
+  /** Newest-first page of transactions, with a cursor for the next page (undefined on the last page). */
+  queryTransactions(q: TransactionQuery = {}): { items: TransactionWithParties[]; nextCursor?: string } {
+    const limit = Math.min(Math.max(q.limit ?? 20, 1), 100);
+    const accountId = q.account ? this.resolveAccount(this.db, q.account, { allowArchived: true }).id : undefined;
+    const conditions: (SQL | undefined)[] = [eq(transactions.userId, this.userId)];
+
+    const status = q.status ?? 'active';
+    if (status !== 'all') conditions.push(eq(transactions.status, status));
+
+    if (accountId) {
+      conditions.push(or(eq(transactions.fromAccountId, accountId), eq(transactions.toAccountId, accountId)));
+      if (q.direction === 'in') conditions.push(eq(transactions.toAccountId, accountId));
+      if (q.direction === 'out') conditions.push(eq(transactions.fromAccountId, accountId));
+    } else {
+      if (q.direction === 'in') conditions.push(isNotNull(transactions.fromExternal));
+      if (q.direction === 'out') conditions.push(isNotNull(transactions.toExternal));
+    }
+    if (q.direction === 'internal') {
+      conditions.push(isNotNull(transactions.fromAccountId), isNotNull(transactions.toAccountId));
+    }
+
+    if (q.cursor) {
+      const [createdAt, rowid] = decodeCursor(q.cursor);
+      conditions.push(
+        or(
+          lt(transactions.createdAt, createdAt),
+          and(eq(transactions.createdAt, createdAt), lt(sql`${transactions}.rowid`, rowid)),
         ),
-      )
-      .orderBy(desc(transactions.createdAt), desc(sql`rowid`))
-      .limit(limit)
+      );
+    }
+
+    const rows = this.db
+      .select({ ...getTableColumns(transactions), rowid: sql<number>`${transactions}.rowid` })
+      .from(transactions)
+      .where(and(...conditions))
+      .orderBy(desc(transactions.createdAt), desc(sql`${transactions}.rowid`))
+      .limit(limit + 1)
       .all();
+
+    const page = rows.slice(0, limit);
+    const last = page.at(-1);
     const names = this.accountNames(this.db);
-    return rows.map((r) => hydrateWith(r, names));
+    return {
+      items: page.map(({ rowid: _rowid, ...r }) => hydrateWith(r, names)),
+      nextCursor: rows.length > limit && last ? `${last.createdAt}.${last.rowid}` : undefined,
+    };
+  }
+
+  listTransactions(opts: { account?: AccountRef; limit?: number; includeVoided?: boolean } = {}): TransactionWithParties[] {
+    return this.queryTransactions({
+      account: opts.account,
+      limit: opts.limit,
+      status: opts.includeVoided ? 'all' : 'active',
+    }).items;
   }
 
   voidTransaction(id: string, reason: string): TransactionWithParties {
     const voidReason = cleanText(reason, '撤销原因', REASON_MAX);
-    return this.db.transaction(
+    const result = this.db.transaction(
       (tx) => {
         const row = tx
           .select()
@@ -305,13 +408,15 @@ export class WalletService {
       },
       { behavior: 'immediate' },
     );
+    this.notify('transactions');
+    return result;
   }
 
   /** Voids every active transaction recorded with `messageId`, e.g. when the host regenerates that message. */
   voidTransactionsByMessage(messageId: string, reason = '消息已重新生成或删除'): TransactionWithParties[] {
     const mid = cleanText(messageId, 'message_id', REF_MAX);
     const voidReason = cleanText(reason, '撤销原因', REASON_MAX);
-    return this.db.transaction(
+    const result = this.db.transaction(
       (tx) => {
         const rows = tx
           .select()
@@ -341,9 +446,15 @@ export class WalletService {
       },
       { behavior: 'immediate' },
     );
+    if (result.length > 0) this.notify('transactions');
+    return result;
   }
 
   // ----------------------------------------------------------------- helpers
+
+  private notify(scope: 'accounts' | 'transactions'): void {
+    this.events?.emit({ userId: this.userId, scope });
+  }
 
   private balanceOf(db: DbOrTx, accountId: string): number {
     const row = db
@@ -367,8 +478,21 @@ export class WalletService {
     return { ...account, balance, available: balance + account.overdraftLimit };
   }
 
-  private resolveAccount(db: DbOrTx, name: string, opts: { allowArchived?: boolean } = {}): Account {
-    const wanted = name.trim();
+  private resolveAccount(db: DbOrTx, ref: AccountRef, opts: { allowArchived?: boolean } = {}): Account {
+    if (typeof ref !== 'string') {
+      const account = db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.userId, this.userId), eq(accounts.id, ref.id)))
+        .get();
+      if (!account) throw new WalletError('ACCOUNT_NOT_FOUND', '找不到该钱包。');
+      if (account.archivedAt !== null && !opts.allowArchived) {
+        throw new WalletError('ACCOUNT_ARCHIVED', `账户「${account.name}」已归档，不能再使用。`);
+      }
+      return account;
+    }
+
+    const wanted = ref.trim();
     const account = db
       .select()
       .from(accounts)
@@ -379,6 +503,7 @@ export class WalletService {
         .select({ name: accounts.name })
         .from(accounts)
         .where(and(eq(accounts.userId, this.userId), isNull(accounts.archivedAt)))
+        .orderBy(accounts.createdAt)
         .all()
         .map((a) => `「${a.name}」`)
         .join('、');
@@ -393,12 +518,9 @@ export class WalletService {
     return account;
   }
 
-  private resolveParty(
-    db: DbOrTx,
-    input: PartyInput,
-    label: string,
-  ): { kind: 'account'; account: Account } | { kind: 'external'; name: string } {
+  private resolveParty(db: DbOrTx, input: PartyInput, label: string): ResolvedParty {
     if ('account' in input) return { kind: 'account', account: this.resolveAccount(db, input.account) };
+    if ('accountId' in input) return { kind: 'account', account: this.resolveAccount(db, { id: input.accountId }) };
     return { kind: 'external', name: cleanText(input.external, `${label}名称`, EXTERNAL_MAX) };
   }
 
@@ -436,11 +558,17 @@ function hydrateWith(row: Transaction, names: Map<string, string>): TransactionW
   return { ...row, from: side(row.fromAccountId, row.fromExternal), to: side(row.toAccountId, row.toExternal) };
 }
 
-function partyAccountId(p: { kind: 'account'; account: Account } | { kind: 'external'; name: string }): string | null {
+function decodeCursor(cursor: string): [createdAt: number, rowid: number] {
+  const m = /^(\d+)\.(\d+)$/.exec(cursor);
+  if (!m) throw new WalletError('INVALID_INPUT', '分页游标无效。');
+  return [Number(m[1]), Number(m[2])];
+}
+
+function partyAccountId(p: ResolvedParty): string | null {
   return p.kind === 'account' ? p.account.id : null;
 }
 
-function partyExternal(p: { kind: 'account'; account: Account } | { kind: 'external'; name: string }): string | null {
+function partyExternal(p: ResolvedParty): string | null {
   return p.kind === 'external' ? p.name : null;
 }
 

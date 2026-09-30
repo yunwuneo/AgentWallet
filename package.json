@@ -1,6 +1,6 @@
 {
   "name": "agentwallet",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Virtual wallets for role-play characters, exposed over MCP",
   "type": "module",
@@ -9,9 +9,10 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "dev:web": "pnpm --filter agentwallet-web dev",
     "start": "node dist/index.js",
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json && pnpm --filter agentwallet-web build",
+    "typecheck": "tsc --noEmit && pnpm --filter agentwallet-web typecheck",
     "test": "vitest run",
     "admin": "tsx src/cli/admin.ts",
     "db:generate": "drizzle-kit generate"

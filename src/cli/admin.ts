@@ -9,9 +9,15 @@ import { openDb } from '../db/client.js';
 const USAGE = `Usage: agentwallet-admin <command> [options]
 
 Commands:
-  create-user --name <name> [--player-name <name>] [--with-key]
-                                  Create a user (and their player account, default "${DEFAULT_PLAYER_NAME}")
+  create-user (--name <name> | --username <login>) [--password <pw>] [--admin]
+              [--player-name <name>] [--with-key]
+                                  Create a user and their player wallet (default "${DEFAULT_PLAYER_NAME}").
+                                  With --username/--password the user can sign in to the web console.
   list-users                      List users
+  set-login --user <id> [--username <login>] [--password <pw>]
+                                  Set the web console login name and/or password
+  set-role --user <id> --role <admin|user>
+                                  Change a user's role
   create-key --user <id> [--label <label>]
                                   Issue an API key (shown once)
   list-keys --user <id>           List a user's API keys
@@ -30,6 +36,10 @@ function main(argv: string[]): number {
       user: { type: 'string' },
       label: { type: 'string' },
       'key-id': { type: 'string' },
+      username: { type: 'string' },
+      password: { type: 'string' },
+      admin: { type: 'boolean' },
+      role: { type: 'string' },
     },
   });
 
@@ -49,14 +59,40 @@ function main(argv: string[]): number {
 
   switch (command) {
     case 'create-user': {
-      const user = users.createUser({ name: require('name'), playerName: values['player-name'] });
+      if (!values.name && !values.username) throw new UsageError('--name or --username is required');
+      const user = users.createUser({
+        name: values.name,
+        username: values.username,
+        password: values.password,
+        role: values.admin ? 'admin' : 'user',
+        playerName: values['player-name'],
+      });
       console.log(`user id: ${user.id}`);
+      if (user.username) console.log(`login:   ${user.username}${user.passwordHash ? '' : ' (no password yet: use set-login)'}`);
       if (values['with-key']) printKey(users.createApiKey(user.id, 'default'));
       return 0;
     }
     case 'list-users':
-      for (const u of users.listUsers()) console.log(`${u.id}\t${u.name}\t${formatTime(u.createdAt)}`);
+      for (const u of users.listUsers()) {
+        const state = u.disabledAt === null ? '' : '\tdisabled';
+        console.log(`${u.id}\t${u.name}\t${u.username ?? '-'}\t${u.role}\t${formatTime(u.createdAt)}${state}`);
+      }
       return 0;
+    case 'set-login': {
+      const userId = require('user');
+      if (!values.username && !values.password) throw new UsageError('--username and/or --password is required');
+      if (values.username) users.updateUser('cli', userId, { username: values.username });
+      if (values.password) users.setPassword(userId, values.password);
+      console.log(`updated ${userId}`);
+      return 0;
+    }
+    case 'set-role': {
+      const role = require('role');
+      if (role !== 'admin' && role !== 'user') throw new UsageError('--role must be admin or user');
+      users.updateUser('cli', require('user'), { role });
+      console.log(`role set to ${role}`);
+      return 0;
+    }
     case 'create-key':
       printKey(users.createApiKey(require('user'), values.label));
       return 0;

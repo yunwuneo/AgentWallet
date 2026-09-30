@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openDb, type Db } from '../src/db/client.js';
-import { UserService } from '../src/core/users.js';
+import { SESSION_TTL_MS, UserService } from '../src/core/users.js';
 import { WalletService } from '../src/core/wallet.js';
 
 let db: Db;
@@ -213,5 +213,28 @@ describe('api keys', () => {
     expect(users.authenticate(key + 'x')).toBeUndefined();
     expect(users.revokeApiKey(id)).toBe(true);
     expect(users.authenticate(key)).toBeUndefined();
+  });
+});
+
+describe('sessions', () => {
+  it('slides the expiry at most daily and expires after 30 idle days', async () => {
+    let now = Date.UTC(2026, 0, 1);
+    const clockDb = openDb(':memory:');
+    const svc = new UserService(clockDb, () => now);
+    svc.createUser({ username: 'neo', password: 'neopass12' });
+    const { token, expiresAt } = (await svc.login('neo', 'neopass12'))!;
+    expect(expiresAt).toBe(now + SESSION_TTL_MS);
+
+    now += 60 * 60 * 1000; // 1 hour later: valid, no renewal write
+    const fresh = svc.resolveSession(token);
+    expect(fresh?.user.username).toBe('neo');
+    expect(fresh?.renewedUntil).toBeUndefined();
+
+    now += 2 * 24 * 60 * 60 * 1000; // 2 days later: renewed
+    expect(svc.resolveSession(token)?.renewedUntil).toBe(now + SESSION_TTL_MS);
+
+    now += SESSION_TTL_MS; // idle for 30 days: expired
+    expect(svc.resolveSession(token)).toBeUndefined();
+    expect(await svc.login('neo', 'wrong-pass')).toBeUndefined();
   });
 });

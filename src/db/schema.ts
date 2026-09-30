@@ -6,8 +6,27 @@ import { check, index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-o
 export const users = sqliteTable('users', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  /** Login name for the web console; null for users that can only use API keys. */
+  username: text('username').unique(),
+  passwordHash: text('password_hash'),
+  role: text('role', { enum: ['admin', 'user'] }).notNull().default('user'),
   createdAt: integer('created_at').notNull(),
+  disabledAt: integer('disabled_at'),
 });
+
+export const sessions = sqliteTable(
+  'sessions',
+  {
+    /** SHA-256 of the session token; the token itself only lives in the cookie. */
+    id: text('id').primaryKey(),
+    userId: text('user_id')
+      .notNull()
+      .references(() => users.id),
+    createdAt: integer('created_at').notNull(),
+    expiresAt: integer('expires_at').notNull(),
+  },
+  (t) => [index('sessions_user_idx').on(t.userId)],
+);
 
 export const apiKeys = sqliteTable('api_keys', {
   id: text('id').primaryKey(),
@@ -80,5 +99,6 @@ export const transactions = sqliteTable(
 );
 
 export type User = typeof users.$inferSelect;
+export type Session = typeof sessions.$inferSelect;
 export type Account = typeof accounts.$inferSelect;
 export type Transaction = typeof transactions.$inferSelect;

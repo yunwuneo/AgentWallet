@@ -15,3 +15,11 @@ const formatter = new Intl.DateTimeFormat('sv-SE', {
 export function formatTime(epochMs: number): string {
   return formatter.format(new Date(epochMs));
 }
+
+const SHANGHAI_OFFSET_MS = 8 * 60 * 60 * 1000; // Asia/Shanghai has no DST.
+
+/** UTC epoch ms of 00:00 on the 1st of the current month in Asia/Shanghai. */
+export function startOfMonthShanghai(nowMs: number): number {
+  const local = new Date(nowMs + SHANGHAI_OFFSET_MS);
+  return Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), 1) - SHANGHAI_OFFSET_MS;
+}
