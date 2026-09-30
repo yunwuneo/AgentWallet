@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { openDb, type Db } from '../src/db/client.js';
 import { UserService } from '../src/core/users.js';
@@ -174,6 +177,32 @@ describe('transactions', () => {
     wallet.recordTransaction({ from: { external: '公司' }, to: { account: '家机A' }, amount: 3, reason: 'second' });
     expect(wallet.listTransactions({ account: '家机A' }).map((t) => t.reason)).toEqual(['second', 'first']);
     expect(wallet.listTransactions({ limit: 1 })).toHaveLength(1);
+  });
+});
+
+describe('storage', () => {
+  it('rolls back the whole transaction when a nested step fails', () => {
+    const before = users.listUsers().length;
+    // The player account is created in a nested (savepoint) transaction; an empty name makes it throw.
+    expect(() => users.createUser({ name: 'carol', playerName: '  ' })).toThrow(/账户名不能为空/);
+    expect(users.listUsers()).toHaveLength(before);
+  });
+
+  it('persists to disk and survives reopening', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agentwallet-'));
+    try {
+      const path = join(dir, 'wallet.db');
+      const first = openDb(path);
+      const id = new UserService(first).createUser({ name: 'dave' }).id;
+      new WalletService(first, id).createAccount({ name: '家机A', initialBalance: 1234 });
+      first.$client.close();
+
+      const reopened = openDb(path);
+      expect(new WalletService(reopened, id).getAccount('家机A').balance).toBe(1234);
+      reopened.$client.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

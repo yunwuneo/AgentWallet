@@ -157,7 +157,7 @@ transactions
 | 运行时 | Node.js 24 LTS，TypeScript，pnpm |
 | MCP | `@modelcontextprotocol/sdk`（Streamable HTTP，无状态） |
 | Web 框架 | Hono（`@hono/node-server`） |
-| 数据库 | Drizzle ORM + better-sqlite3（以后可切换 Postgres） |
+| 数据库 | Drizzle ORM + Node 内置 `node:sqlite`（无原生依赖，经 `src/db/node-sqlite.ts` 适配；以后可切换 Postgres） |
 | 校验 | zod |
 | 测试 | vitest |
 

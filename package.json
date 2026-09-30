@@ -22,13 +22,11 @@
   "dependencies": {
     "@hono/node-server": "^2.1.3",
     "@modelcontextprotocol/sdk": "^1.31.0",
-    "better-sqlite3": "^13.0.3",
-    "drizzle-orm": "^0.45.3",
+    "drizzle-orm": "0.45.3",
     "hono": "^4.13.11",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.3",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.23.15",
