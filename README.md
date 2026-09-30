@@ -46,6 +46,17 @@ cp .env.example .env   # Windows: copy .env.example .env
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `PORT` | `8787` | 监听端口 |
 | `DATABASE_PATH` | `./data/agentwallet.db` | SQLite 文件路径，启动时自动迁移 |
+| `DEMO_ENABLED` | `false` | 设为 `true` 时登录页显示「体验演示」入口 |
+| `DEMO_TTL_HOURS` | `24` | 演示账号的有效期（小时） |
+
+### 演示入口
+
+`DEMO_ENABLED=true` 时，登录页会出现「体验演示」按钮。每位访客点击后获得一个**独立的临时账号**，预置 1 个「我的钱包」、3 个 Agent 钱包和约两周的示例流水，可以随意记账、撤销、新建 Agent，也可以创建 API Key 真实接入 MCP。
+
+- 访客之间互不可见；演示账号不出现在「用户管理」里，也没有管理权限。
+- 到期后登录会话和 API Key 立即失效，服务每 10 分钟删除一次过期演示账号的全部数据。
+- 防滥用：同一 IP 每小时最多创建 5 个；同时存在的演示账号最多 200 个。
+- 关闭入口后，已创建的演示账号仍会按期清除。`pnpm admin list-users` 会标出演示账号。
 
 ## 部署
 

@@ -3,6 +3,8 @@ import { Hono, type Context, type MiddlewareHandler } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
 import { streamSSE } from 'hono/streaming';
 import * as z from 'zod';
+import { DEFAULT_DEMO, type DemoConfig } from '../config.js';
+import { createDemoUser } from '../core/demo.js';
 import type { Db } from '../db/client.js';
 import type { User } from '../db/schema.js';
 import { WalletError, type WalletErrorCode } from '../core/errors.js';
@@ -121,32 +123,33 @@ function presentTransaction(t: TransactionWithParties) {
   };
 }
 
-// ------------------------------------------------------------ login limiter
+// --------------------------------------------------------------- limiters
 
-const LOGIN_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_MAX_FAILURES = 5;
+/** Fixed-window counter per key, in memory; enough for a single-process deployment. */
+class WindowCounter {
+  private readonly hits = new Map<string, { count: number; resetAt: number }>();
 
-/** Counts failed logins per (username, IP) in memory; enough for a single-process deployment. */
-class LoginLimiter {
-  private readonly failures = new Map<string, { count: number; resetAt: number }>();
+  constructor(
+    private readonly max: number,
+    private readonly windowMs: number,
+  ) {}
 
   isBlocked(key: string, now: number): boolean {
-    const entry = this.failures.get(key);
-    if (!entry || entry.resetAt <= now) return false;
-    return entry.count >= LOGIN_MAX_FAILURES;
+    const entry = this.hits.get(key);
+    return !!entry && entry.resetAt > now && entry.count >= this.max;
   }
 
-  fail(key: string, now: number): void {
-    const entry = this.failures.get(key);
-    if (!entry || entry.resetAt <= now) this.failures.set(key, { count: 1, resetAt: now + LOGIN_WINDOW_MS });
+  hit(key: string, now: number): void {
+    const entry = this.hits.get(key);
+    if (!entry || entry.resetAt <= now) this.hits.set(key, { count: 1, resetAt: now + this.windowMs });
     else entry.count += 1;
-    if (this.failures.size > 10_000) {
-      for (const [k, v] of this.failures) if (v.resetAt <= now) this.failures.delete(k);
+    if (this.hits.size > 10_000) {
+      for (const [k, v] of this.hits) if (v.resetAt <= now) this.hits.delete(k);
     }
   }
 
   reset(key: string): void {
-    this.failures.delete(key);
+    this.hits.delete(key);
   }
 }
 
@@ -179,13 +182,16 @@ function setSessionCookie(c: Context, token: string, expiresAt: number): void {
 export interface ApiDeps {
   db: Db;
   events: WalletEvents;
+  demo?: DemoConfig;
   /** SSE keep-alive interval; shortened in tests. */
   heartbeatMs?: number;
 }
 
-export function createApi({ db, events, heartbeatMs = 25_000 }: ApiDeps): Hono<Env> {
+export function createApi({ db, events, heartbeatMs = 25_000, demo = DEFAULT_DEMO }: ApiDeps): Hono<Env> {
   const users = new UserService(db);
-  const limiter = new LoginLimiter();
+  // Failed logins per (username, IP): 5 per 15 minutes.
+  const loginFailures = new WindowCounter(5, 15 * 60 * 1000);
+  const demoCreations = new WindowCounter(demo.perIpPerHour, 60 * 60 * 1000);
   const wallet = (c: Context<Env>) => new WalletService(db, c.get('user').id, { events });
 
   const api = new Hono<Env>();
@@ -220,17 +226,39 @@ export function createApi({ db, events, heartbeatMs = 25_000 }: ApiDeps): Hono<E
     const { username, password } = await readJson(c, schemas.login);
     const key = `${username.trim().toLowerCase()}|${clientIp(c)}`;
     const now = Date.now();
-    if (limiter.isBlocked(key, now)) {
+    if (loginFailures.isBlocked(key, now)) {
       return c.json({ error: 'RATE_LIMITED', message: '登录失败次数过多，请 15 分钟后再试。' }, 429);
     }
     const result = await users.login(username, password);
     if (!result) {
-      limiter.fail(key, now);
+      loginFailures.hit(key, now);
       return c.json({ error: 'INVALID_CREDENTIALS', message: '用户名或密码错误。' }, 401);
     }
-    limiter.reset(key);
+    loginFailures.reset(key);
     setSessionCookie(c, result.token, result.expiresAt);
     return c.json({ user: toPublicUser(result.user) });
+  });
+
+  // Public settings the login page needs before anyone is signed in.
+  api.get('/config', (c) => c.json({ demo: { enabled: demo.enabled, ttlHours: demo.ttlMs / 3_600_000 } }));
+
+  /** Starts a fresh, isolated demo sandbox for this visitor and signs them in. */
+  api.post('/auth/demo', (c) => {
+    if (!demo.enabled) return c.json({ error: 'NOT_FOUND', message: '演示入口未开启。' }, 404);
+    const ip = clientIp(c);
+    const now = Date.now();
+    if (demoCreations.isBlocked(ip, now)) {
+      return c.json({ error: 'RATE_LIMITED', message: '创建演示账号过于频繁，请稍后再试。' }, 429);
+    }
+    users.purgeExpiredDemos();
+    if (users.countActiveDemos() >= demo.maxActive) {
+      return c.json({ error: 'DEMO_FULL', message: '演示名额已满，请稍后再试。' }, 503);
+    }
+    demoCreations.hit(ip, now);
+    const user = createDemoUser(db, users, { ttlMs: demo.ttlMs, now });
+    const session = users.createSession(user);
+    setSessionCookie(c, session.token, session.expiresAt);
+    return c.json({ user: toPublicUser(user) }, 201);
   });
 
   api.post('/auth/logout', (c) => {

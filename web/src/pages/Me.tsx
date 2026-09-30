@@ -30,7 +30,7 @@ export function Me() {
         <div style={{ minWidth: 0 }}>
           <div style={{ fontWeight: 700, fontSize: 18 }}>{user.name}</div>
           <div className="subtle">
-            @{user.username} · {user.role === 'admin' ? '管理员' : '用户'}
+            {user.demoExpiresAt ? '演示账号' : `@${user.username} · ${user.role === 'admin' ? '管理员' : '用户'}`}
           </div>
         </div>
       </div>
@@ -52,16 +52,18 @@ export function Me() {
         </div>
       </section>
 
-      <section className="section">
-        <div className="section-head">
-          <h2 className="section-title">修改密码</h2>
-        </div>
-        <ChangePassword />
-      </section>
+      {user.demoExpiresAt ? null : (
+        <section className="section">
+          <div className="section-head">
+            <h2 className="section-title">修改密码</h2>
+          </div>
+          <ChangePassword />
+        </section>
+      )}
 
       <section className="section">
         <button className="btn ghost block" onClick={logout}>
-          <LogOut size={18} /> 退出登录
+          <LogOut size={18} /> {user.demoExpiresAt ? '退出演示' : '退出登录'}
         </button>
       </section>
     </>

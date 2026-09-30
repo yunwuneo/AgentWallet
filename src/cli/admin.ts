@@ -73,8 +73,10 @@ function main(argv: string[]): number {
       return 0;
     }
     case 'list-users':
-      for (const u of users.listUsers()) {
-        const state = u.disabledAt === null ? '' : '\tdisabled';
+      for (const u of users.listUsers({ includeDemo: true })) {
+        const state =
+          (u.disabledAt === null ? '' : '\tdisabled') +
+          (u.demoExpiresAt === null ? '' : `\tdemo until ${formatTime(u.demoExpiresAt)}`);
         console.log(`${u.id}\t${u.name}\t${u.username ?? '-'}\t${u.role}\t${formatTime(u.createdAt)}${state}`);
       }
       return 0;

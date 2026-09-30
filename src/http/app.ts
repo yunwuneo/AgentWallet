@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { Hono } from 'hono';
+import { DEFAULT_DEMO, type DemoConfig } from '../config.js';
 import type { Db } from '../db/client.js';
 import { WalletEvents } from '../core/events.js';
 import { UserService } from '../core/users.js';
@@ -21,6 +22,8 @@ export interface AppOptions {
   /** Directory of the built web console; defaults to web/dist. */
   webDist?: string;
   heartbeatMs?: ApiDeps['heartbeatMs'];
+  /** Demo entry settings; disabled by default. */
+  demo?: Partial<DemoConfig>;
 }
 
 /** One Hono app serving MCP at /mcp, the web API at /api and the web console everywhere else. */
@@ -63,7 +66,7 @@ export function createApp(db: Db, opts: AppOptions = {}): Hono<{ Variables: { us
 
   // ------------------------------------------------------------------- API
 
-  app.route('/api', createApi({ db, events, heartbeatMs: opts.heartbeatMs }));
+  app.route('/api', createApi({ db, events, heartbeatMs: opts.heartbeatMs, demo: { ...DEFAULT_DEMO, ...opts.demo } }));
 
   // ------------------------------------------------------------ web console
 

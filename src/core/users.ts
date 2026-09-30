@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { and, count, eq, isNull, lt, ne } from 'drizzle-orm';
+import { and, count, eq, gt, inArray, isNotNull, isNull, lt, lte, ne, or } from 'drizzle-orm';
 import type { DbHandle } from '../db/client.js';
-import { apiKeys, sessions, users, type User } from '../db/schema.js';
+import { accounts, apiKeys, sessions, transactions, users, type User } from '../db/schema.js';
 import { WalletError } from './errors.js';
 import { newId } from './ids.js';
 import { DUMMY_PASSWORD_HASH, hashPassword, verifyPassword } from './password.js';
@@ -30,6 +30,8 @@ export interface PublicUser {
   createdAt: number;
   disabledAt: number | null;
   hasPassword: boolean;
+  /** Set for temporary demo users. */
+  demoExpiresAt: number | null;
 }
 
 export interface CreateUserInput {
@@ -38,6 +40,8 @@ export interface CreateUserInput {
   password?: string;
   role?: Role;
   playerName?: string;
+  /** Makes this a temporary demo user that stops working at this time. */
+  demoExpiresAt?: number;
 }
 
 export function hashApiKey(key: string): string {
@@ -57,6 +61,7 @@ export function toPublicUser(u: User): PublicUser {
     createdAt: u.createdAt,
     disabledAt: u.disabledAt,
     hasPassword: u.passwordHash !== null,
+    demoExpiresAt: u.demoExpiresAt,
   };
 }
 
@@ -86,6 +91,7 @@ export class UserService {
           role: input.role ?? 'user',
           createdAt: this.now(),
           disabledAt: null,
+          demoExpiresAt: input.demoExpiresAt ?? null,
         };
         tx.insert(users).values(user).run();
         // WalletService opens a nested transaction, which drizzle runs as a savepoint.
@@ -99,8 +105,13 @@ export class UserService {
     );
   }
 
-  listUsers(): User[] {
-    return this.db.select().from(users).orderBy(users.createdAt).all();
+  listUsers(opts: { includeDemo?: boolean } = {}): User[] {
+    return this.db
+      .select()
+      .from(users)
+      .where(opts.includeDemo ? undefined : isNull(users.demoExpiresAt))
+      .orderBy(users.createdAt)
+      .all();
   }
 
   getUser(id: string): User | undefined {
@@ -191,12 +202,17 @@ export class UserService {
     const ok = await verifyPassword(password, user?.passwordHash ?? DUMMY_PASSWORD_HASH);
     if (!user || !user.passwordHash || !ok || user.disabledAt !== null) return undefined;
 
+    return { user, ...this.createSession(user) };
+  }
+
+  /** Opens a session for `user`; demo users' sessions end with the demo. */
+  createSession(user: User): { token: string; expiresAt: number } {
     const token = randomBytes(32).toString('base64url');
     const now = this.now();
-    const expiresAt = now + SESSION_TTL_MS;
+    const expiresAt = Math.min(now + SESSION_TTL_MS, user.demoExpiresAt ?? Infinity);
     this.db.insert(sessions).values({ id: hashToken(token), userId: user.id, createdAt: now, expiresAt }).run();
     this.db.delete(sessions).where(lt(sessions.expiresAt, now)).run(); // opportunistic cleanup
-    return { user, token, expiresAt };
+    return { token, expiresAt };
   }
 
   /**
@@ -213,12 +229,14 @@ export class UserService {
       .get();
     if (!row) return undefined;
     const now = this.now();
-    if (row.session.expiresAt <= now || row.user.disabledAt !== null) {
+    const demoOver = row.user.demoExpiresAt !== null && row.user.demoExpiresAt <= now;
+    if (row.session.expiresAt <= now || row.user.disabledAt !== null || demoOver) {
       this.db.delete(sessions).where(eq(sessions.id, id)).run();
       return undefined;
     }
-    if (row.session.expiresAt - now < SESSION_TTL_MS - SESSION_RENEW_AFTER_MS) {
-      const renewedUntil = now + SESSION_TTL_MS;
+    const cap = row.user.demoExpiresAt ?? Infinity;
+    if (row.session.expiresAt - now < SESSION_TTL_MS - SESSION_RENEW_AFTER_MS && row.session.expiresAt < cap) {
+      const renewedUntil = Math.min(now + SESSION_TTL_MS, cap);
       this.db.update(sessions).set({ expiresAt: renewedUntil }).where(eq(sessions.id, id)).run();
       return { user: row.user, renewedUntil };
     }
@@ -265,16 +283,56 @@ export class UserService {
     return Number(res.changes) > 0;
   }
 
-  /** Returns the user id owning `key`, or undefined if the key is unknown, revoked, or its user is disabled. */
+  /** Returns the user id owning `key`, or undefined if the key is unknown or revoked, or its user is disabled or an expired demo. */
   authenticate(key: string): string | undefined {
     if (!key.startsWith(API_KEY_PREFIX)) return undefined;
     const row = this.db
       .select({ userId: apiKeys.userId })
       .from(apiKeys)
       .innerJoin(users, eq(users.id, apiKeys.userId))
-      .where(and(eq(apiKeys.keyHash, hashApiKey(key)), isNull(apiKeys.revokedAt), isNull(users.disabledAt)))
+      .where(
+        and(
+          eq(apiKeys.keyHash, hashApiKey(key)),
+          isNull(apiKeys.revokedAt),
+          isNull(users.disabledAt),
+          or(isNull(users.demoExpiresAt), gt(users.demoExpiresAt, this.now())),
+        ),
+      )
       .get();
     return row?.userId;
+  }
+
+  // ------------------------------------------------------------ demo users
+
+  countActiveDemos(): number {
+    const row = this.db
+      .select({ n: count() })
+      .from(users)
+      .where(and(isNotNull(users.demoExpiresAt), gt(users.demoExpiresAt, this.now())))
+      .get();
+    return row?.n ?? 0;
+  }
+
+  /** Permanently deletes expired demo users with all their wallets, transactions, keys and sessions. */
+  purgeExpiredDemos(): number {
+    const expired = this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(and(isNotNull(users.demoExpiresAt), lte(users.demoExpiresAt, this.now())))
+      .all()
+      .map((u) => u.id);
+    if (expired.length === 0) return 0;
+    this.db.transaction(
+      (tx) => {
+        tx.delete(transactions).where(inArray(transactions.userId, expired)).run();
+        tx.delete(accounts).where(inArray(accounts.userId, expired)).run();
+        tx.delete(apiKeys).where(inArray(apiKeys.userId, expired)).run();
+        tx.delete(sessions).where(inArray(sessions.userId, expired)).run();
+        tx.delete(users).where(inArray(users.id, expired)).run();
+      },
+      { behavior: 'immediate' },
+    );
+    return expired.length;
   }
 
   // ----------------------------------------------------------------- helpers

@@ -4,6 +4,7 @@ import {
   type Account,
   type ApiKey,
   type PartyInput,
+  type PublicConfig,
   type Summary,
   type Transaction,
   type TransactionPage,
@@ -28,6 +29,10 @@ export function useMe() {
     queryFn: () => api.get<{ user: User }>('/me').then((r) => r.user),
     staleTime: 5 * 60_000,
   });
+}
+
+export function usePublicConfig() {
+  return useQuery({ queryKey: ['config'], queryFn: () => api.get<PublicConfig>('/config'), staleTime: Infinity });
 }
 
 export function useSummary() {

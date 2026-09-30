@@ -3,6 +3,7 @@ import { House, KeyRound, LogOut, Plus, ReceiptText, Settings, UserRound, Users,
 import { useEffect } from 'react';
 import { Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router';
 import { api, ApiError, type User } from '../lib/api';
+import { formatDateTime } from '../lib/format';
 import { keys, useMe } from '../lib/queries';
 import { RecordProvider, useRecord } from './record';
 import { Avatar, Spinner } from './ui';
@@ -105,7 +106,7 @@ function Shell({ user }: { user: User }) {
           <Avatar name={user.name} />
           <div className="who">
             <strong>{user.name}</strong>
-            <span className="subtle">@{user.username}</span>
+            <span className="subtle">{user.demoExpiresAt ? '演示账号' : `@${user.username}`}</span>
           </div>
           <button className="icon-btn" onClick={logout} title="退出登录" aria-label="退出登录">
             <LogOut size={18} />
@@ -114,6 +115,15 @@ function Shell({ user }: { user: User }) {
       </aside>
 
       <main className="main">
+        {user.demoExpiresAt ? (
+          <div className="notice demo-banner">
+            <strong>演示模式</strong>
+            <span>
+              这是你的专属演示账号，可随意操作，也可以在 API Keys 页创建 Key 接入 MCP。数据将于{' '}
+              <span className="num">{formatDateTime(user.demoExpiresAt).slice(0, 16)}</span> 自动清除。
+            </span>
+          </div>
+        ) : null}
         <Outlet />
       </main>
 

@@ -35,6 +35,12 @@ export interface User {
   createdAt: number;
   disabledAt: number | null;
   hasPassword: boolean;
+  /** Set for temporary demo users. */
+  demoExpiresAt: number | null;
+}
+
+export interface PublicConfig {
+  demo: { enabled: boolean; ttlHours: number };
 }
 
 export interface ApiKey {

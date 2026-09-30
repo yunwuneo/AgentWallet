@@ -12,6 +12,8 @@ export const users = sqliteTable('users', {
   role: text('role', { enum: ['admin', 'user'] }).notNull().default('user'),
   createdAt: integer('created_at').notNull(),
   disabledAt: integer('disabled_at'),
+  /** Set for temporary demo users; they stop working at this time and are purged afterwards. */
+  demoExpiresAt: integer('demo_expires_at'),
 });
 
 export const sessions = sqliteTable(

@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { openDb, type Db } from '../src/db/client.js';
 import { SESSION_TTL_MS, UserService } from '../src/core/users.js';
 import { WalletService } from '../src/core/wallet.js';
+import { createDemoUser } from '../src/core/demo.js';
 
 let db: Db;
 let users: UserService;
@@ -236,5 +237,33 @@ describe('sessions', () => {
     now += SESSION_TTL_MS; // idle for 30 days: expired
     expect(svc.resolveSession(token)).toBeUndefined();
     expect(await svc.login('neo', 'wrong-pass')).toBeUndefined();
+  });
+});
+
+describe('demo users', () => {
+  it('stop working at expiry and are purged with all their data', async () => {
+    let now = Date.UTC(2026, 0, 1);
+    const clockDb = openDb(':memory:');
+    const svc = new UserService(clockDb, () => now);
+    const regular = svc.createUser({ username: 'neo', password: 'neopass12' });
+    const demo = createDemoUser(clockDb, svc, { ttlMs: 60 * 60 * 1000, now });
+
+    const { token, expiresAt } = svc.createSession(demo);
+    expect(expiresAt).toBe(now + 60 * 60 * 1000);
+    const { key } = svc.createApiKey(demo.id);
+    expect(svc.resolveSession(token)?.user.id).toBe(demo.id);
+    expect(svc.authenticate(key)).toBe(demo.id);
+    expect(svc.purgeExpiredDemos()).toBe(0);
+    expect(svc.countActiveDemos()).toBe(1);
+
+    now += 60 * 60 * 1000;
+    expect(svc.resolveSession(token)).toBeUndefined();
+    expect(svc.authenticate(key)).toBeUndefined();
+    expect(svc.countActiveDemos()).toBe(0);
+
+    expect(svc.purgeExpiredDemos()).toBe(1);
+    expect(svc.getUser(demo.id)).toBeUndefined();
+    expect(new WalletService(clockDb, demo.id).listAccounts({ includeArchived: true })).toEqual([]);
+    expect(svc.listUsers({ includeDemo: true }).map((u) => u.id)).toEqual([regular.id]);
   });
 });

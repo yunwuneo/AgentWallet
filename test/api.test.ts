@@ -336,3 +336,59 @@ describe('web console hosting', () => {
     }
   });
 });
+
+describe('demo entry', () => {
+  const demoApp = (demo: Record<string, unknown> = {}) => {
+    app = createApp(db, { events, demo: { enabled: true, ...demo } });
+  };
+
+  it('is off by default', async () => {
+    const b = new Browser();
+    expect((await b.get('/api/config')).json).toEqual({ demo: { enabled: false, ttlHours: 24 } });
+    expect((await b.post('/api/auth/demo')).status).toBe(404);
+  });
+
+  it('gives each visitor an isolated, pre-seeded sandbox', async () => {
+    demoApp();
+    const a = new Browser();
+    const b = new Browser();
+    expect((await a.get('/api/config')).json.demo.enabled).toBe(true);
+
+    const res = await a.post('/api/auth/demo');
+    expect(res.status).toBe(201);
+    expect(res.json.user).toMatchObject({ role: 'user', username: null, demoExpiresAt: expect.any(Number) });
+    await b.post('/api/auth/demo');
+
+    const summary = (await a.get('/api/summary')).json;
+    expect(summary.accounts.map((x: { name: string }) => x.name)).toEqual(['主人', '家机A', '家机B', '小爱']);
+    expect((await a.get('/api/transactions?limit=100')).json.items.length).toBeGreaterThan(8);
+    expect((await a.get('/api/transactions?status=voided')).json.items).toHaveLength(1);
+
+    const agent = summary.accounts[1].id;
+    await a.post('/api/transactions', { from: { accountId: agent }, to: { external: '店' }, amount: 1, reason: 'x' });
+    expect((await b.get('/api/summary')).json.total).toBe(summary.total);
+    expect((await b.get(`/api/accounts/${agent}`)).status).toBe(404);
+
+    // Demo users can connect MCP, but never appear in (or reach) user administration.
+    const { key } = (await a.post('/api/keys', { label: 'demo' })).json;
+    expect(users.authenticate(key)).toBe(res.json.user.id);
+    expect((await a.get('/api/admin/users')).status).toBe(403);
+    const root = new Browser();
+    await root.login('root', 'rootpass1');
+    expect((await root.get('/api/admin/users')).json.users.map((u: { username: string }) => u.username)).toEqual([
+      'root',
+      'neo',
+    ]);
+  });
+
+  it('limits creations per IP and in total', async () => {
+    demoApp({ perIpPerHour: 2 });
+    const b = new Browser();
+    expect((await b.post('/api/auth/demo')).status).toBe(201);
+    expect((await b.post('/api/auth/demo')).status).toBe(201);
+    expect((await b.post('/api/auth/demo')).status).toBe(429);
+
+    demoApp({ maxActive: 2 });
+    expect((await new Browser().post('/api/auth/demo')).status).toBe(503);
+  });
+});
